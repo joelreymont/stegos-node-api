@@ -1,0 +1,4 @@
+TODO -*- mode: org -*-
+#+STARTUP: overview hidestars
+#+SEQ_TODO: TODO(t) NEXT(n) | DONE(d) KILLED(k)
+
