@@ -92,13 +92,7 @@
   ((token :initarg :token :reader token)
    (websocket :initarg :websocket :reader websocket)
    (queue :initarg :queue :reader queue)
-   (message-filters :initform nil :accessor message-filters)
    ))
-
-(defmethod filter ((self context) &rest kind)
-  (dolist (k kind)
-    (pushnew k (message-filters self))
-    ))
 
 (defun create-context (&optional (endpoint *endpoint*))
   (let* ((token (base64-string-to-usb8-array (load-api-token)))
@@ -122,7 +116,7 @@
     ))
 
 (defmethod destroy-context ((self context))
-  (close-websocket (websocket self)))
+  (close-websocket (websocket self) :wait t))
 
 (defmethod send ((self context) js)
   (let* ((msg (jsown:to-json (to-json js)))
