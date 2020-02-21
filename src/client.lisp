@@ -124,7 +124,7 @@
 
 (defmethod send ((self client) o)
   (let ((seq (incf (seq self))))
-    (when (slot-boundp o 'seq)
+    (when (slot-exists-p o 'seq)
       (setf (slot-value o 'seq) seq))
     (send (ctx self) o)
     ))
@@ -214,16 +214,26 @@
                                   :fee 1000
                                   ))
     (multiple-value-bind (tx-id status)
-        (wait-for-tx (seq self) :debug t)
+        (wait-for-tx self (seq self) :debug debug)
       (when debug
         (format *debug-io* "stake-remote-all: tx ~A ~A~%" tx-id status))
       )))
+
+(defmethod unstake ((self client) account-id amount &key debug)
+  (send self (make-unstake :id account-id
+                           :amount amount
+                           :fee 1000
+                           ))
+  (multiple-value-bind (tx-id status)
+      (wait-for-tx self (seq self) :debug debug)
+    (when debug
+      (format *debug-io* "unstake: tx ~A ~A~%" tx-id status))
+    ))
 
 (defmethod unlock-account ((self client) account-id)
   (send self (make-unlock-account :id account-id
                                   :password (password self)))
   (expect self (match-type-seq 'unlocked (seq self))))
-
 
 ;; "2020-01-01T00:00:00.00000Z"
 (defmethod get-payment-history ((self client) account-id timestamp &optional (limit 1000000))

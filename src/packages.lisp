@@ -18,7 +18,7 @@
            :send
            :update-balance
            :unlock-account
-           :stake-remote-all
+           :stake-remote-all :unstake
            :get-payment-history
            :sweep-utxos
            :match-type-seq
