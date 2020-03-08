@@ -81,31 +81,49 @@
         unless (member (type-of o) (message-filters self))
         when (or (null o) (funcall matcher o))
         return o do
-        (when debug
-          (format *debug-io* "--> ~A~%" o))
+          (when (and debug (not (member (type-of o) (message-filters self))))
+            (format *debug-io* "--> ~A~%" o))
         ))
 
 (defmethod wait-for-tx ((self client) seq &key debug)
-  (let ((o (expect self (match-type-seq 'tx-created seq) :debug debug)))
-    (ecase (type-of o)
-      (api-error
-       (values nil (api-error-error o)))
-      (tx-created
-       (let ((tx-id (tx-created-tx-id o))
-             (status (tx-created-status o)))
-         (when debug
-           (format *debug-io* "wait-for-tx: tx id ~A, status ~A~%" tx-id status))
-         (when (not (status-done-p status))
-           (let ((o (expect self (match-done-tx tx-id) :debug debug)))
-             (when debug
-               (format *debug-io* "wait-for-tx: o: ~A~%" o))
-             ))
-         (values t tx-id)
-         ))
-      )))
+  (prog ((o (expect self (match-type-seq 'tx-created seq) :debug debug))
+         id status e)
+     (unless o (go error))
+     (ecase (type-of o)
+       (api-error
+        (setq e (api-error-error o))
+        (go error))
+       (tx-created
+        (setq status (tx-created-status o))
+        (setq id (tx-created-tx-id o))
+        (when debug
+          (format *debug-io* "~&wait-for-tx: <start> status: ~A~%" status))
+        (go check)))
+   check
+     (case (intern (string-upcase status) :api)
+       ((accepted prepared) (go done))
+       (rejected (go error))
+       (otherwise (go wait)))
+   wait
+     (setq o (expect self (match-done-tx id) :debug debug))
+     (unless o (go error))
+     (setq status (tx-status-status o))
+     (setq e (tx-status-error o))
+     (when debug
+       (format *debug-io* "~&wait-for-tx: <wait> status: ~A, error: ~A~%" status e))
+     (go check)
+   error
+     (when debug
+       (format *debug-io* "~&wait-for-tx: <error> ~A~%" e))
+     (values nil e)
+   done
+     (when debug
+       (format *debug-io* "~&wait-for-tx: <done> ~A~%" id))
+     (values t id)
+     ))
 
 (defmethod slurp-all ((self client) &key (debug nil))
-  (expect self #'null :debug debug))
+  (expect self #'null :debug debug :wait 0))
 
 (defun slice (a start end)
   (make-array (- end start)
@@ -138,9 +156,9 @@
     (chunk-vector coins 100)
     ))
 
-(defmethod fetch-accounts ((self client))
+(defmethod fetch-accounts ((self client) &key (debug nil))
   (send self (make-get-accounts))
-  (let* ((o (expect self (match-type-seq 'accounts (seq self))))
+  (let* ((o (expect self (match-type-seq 'accounts (seq self)) :debug debug))
          (accounts (accounts-accounts o)))
     (loop for k being the hash-keys of accounts
             using (hash-value v)
@@ -182,7 +200,7 @@
             (when debug
               (format *debug-io* "sweep-utxos: Collecting #~A: ~A~%" i amt))
             ;; pay to self
-            (pay self account-id address (+ amt 1) :comment "Sweep")
+            (pay self account-id address (+ amt 1) :comment "Sweep" :debug debug)
           )))
 
 (defmethod update-balance ((self client) account-id)
@@ -243,3 +261,17 @@
                                        ))
   (expect self (match-type-seq 'payment-history (seq self))))
 
+
+(defmethod sweep-and-stake-all ((self client) &key (debug nil))
+  (loop for i from 1 to 8
+        for account-id = (format nil "validator0~A" i) do
+          (unlock-account self account-id)
+          (sweep-utxos self account-id :debug debug)
+          (update-balance self account-id)
+          (stake-remote-all self account-id :debug debug)
+        ))
+
+;; (loop for i from 1 to 8 for account-id = (format nil "validator0~A" i) do
+  
+;;   (update-balance c account-id)
+;;   (format t "~&~A: ~A" account-id (balance c account-id)))

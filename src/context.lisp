@@ -4,7 +4,7 @@
 ;;; Finite queue
 ;;;
 
-(defvar *default-finite-queue-max-size* 1024
+(defvar *default-finite-queue-max-size* 16384
   "The default maximum size for a finite-queue.")
 
 (defclass finite-queue (mp:queue)
@@ -108,7 +108,7 @@
                                          (format *debug-io* "~&CLOSED with code ~A ~A~%" code data))
                              :on-error (lambda (contract)
                                          (format *debug-io* "~&ERROR: ~A~%" contract))
-                             :debug t
+                             :debug :t
                              )))
     (make-instance 'context :token token
                             :websocket ws
