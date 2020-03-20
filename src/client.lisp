@@ -268,13 +268,22 @@
 
 
 (defmethod sweep-and-stake-all ((self client) &key (debug nil))
-  (loop for i from 1 to 8
-        for account-id = (format nil "validator0~A" i) do
+  (let ((accounts `("pool01" "validator01" "validator02" "validator03" "validator04"
+                             "validator05" "validator06" "validator07" "validator08")))
+    (loop for account-id in accounts do
           (unlock-account self account-id)
           (sweep-utxos self account-id :debug debug)
           (update-balance self account-id)
           (stake-remote-all self account-id :debug debug)
-        ))
+        )))
+
+(defmethod count-chunks ((self client) &key (debug nil))
+  (let ((accounts `("pool01" "validator01" "validator02" "validator03" "validator04"
+                             "validator05" "validator06" "validator07" "validator08")))
+    (loop for account-id in accounts do
+      (unlock-account self account-id)
+      (format *debug-io* "count-chunks: ~A = ~A chunks~%" account-id (length (get-chunks self account-id)))
+          )))
 
 ;; (loop for i from 1 to 8 for account-id = (format nil "validator0~A" i) do
   
