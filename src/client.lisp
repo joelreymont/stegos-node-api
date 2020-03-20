@@ -1,5 +1,7 @@
 (in-package :stegos/node-api)
 
+(defconstant *microblock-time* 10) ; seconds
+
 (defclass balance ()
   ((total$ :initarg :total$ :initform 0 :accessor total$)
    (available$ :initarg :available$ :initform 0 :accessor available$)
@@ -87,7 +89,8 @@
 
 (defmethod wait-for-tx ((self client) seq &key debug)
   (prog ((o (expect self (match-type-seq 'tx-created seq) :debug debug))
-         id status e)
+         (re (cl-ppcre:create-scanner "mempool"))
+         id status resend? e)
      (unless o (go error))
      (ecase (type-of o)
        (api-error
@@ -115,11 +118,13 @@
    error
      (when debug
        (format *debug-io* "~&wait-for-tx: <error> ~A~%" e))
-     (values nil e)
+     (when (cl-ppcre:scan re e)
+       (setq resend? t))
+     (return (values nil resend? e))
    done
      (when debug
        (format *debug-io* "~&wait-for-tx: <done> ~A~%" id))
-     (values t id)
+     (return (values t id))
      ))
 
 (defmethod slurp-all ((self client) &key (debug nil))
@@ -172,22 +177,22 @@
     ))
 
 (defmethod pay ((self client) account-id to amt &key (comment "") (proof t) (debug t))
-  (send self (make-create-payment-with-cert :id account-id
-                                            :to to
-                                            :fee 1000
-                                            :comment comment
-                                            :amount amt
-                                            :has-certificate? proof
-                                            ))
-  (wait-for-tx self (seq self) :debug debug))
-
-;; (loop for o = (expect self (match-done-tx tx-id) :debug t)
-;;       for status = (when o (tx-status-tx-status o))
-;;       for tx-id = (when o (tx-status-tx-id o))
-;;       until (or (null o) (= 0 (hash-table-count txs))) do
-;;         (when debug
-;;           (format *debug-io* "sweep-utxos: tx ~A: ~A~%" tx-id status))
-;;         (remhash tx-id txs))
+  (flet ((pay () (send self (make-create-payment-with-cert :id account-id
+                                                           :to to
+                                                           :fee 1000
+                                                           :comment comment
+                                                           :amount amt
+                                                           :has-certificate? proof
+                                                           )))
+         (wait () (multiple-value-list (wait-for-tx self (seq self) :debug debug))))
+    (pay)
+    (loop for (v resend?) = (wait)
+          while (and (null v) resend?) do
+            (when debug
+              (format *debug-io* "pay: Account ~A: mempool is full, waiting~%" account-id))
+            (sleep *microblock-time*)
+            (pay)
+          )))
 
 (defmethod sweep-utxos ((self client) account-id &key debug)
   (let ((address (address-of self account-id))
