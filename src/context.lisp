@@ -88,21 +88,28 @@
     (usb8-array-to-base64-string data :wrap-at-column nil)
     ))
 
-(defclass context  ()
+(defclass context ()
   ((token :initarg :token :reader token)
-   (websocket :initarg :websocket :reader websocket)
+   (websocket :initarg :websocket :accessor websocket)
    (queue :initarg :queue :reader queue)
+   (lock :initarg :lock :reader lock)
+   (process-msg? :initform nil :accessor process-msg?)
    ))
 
 (defun create-context (&optional (endpoint *endpoint*))
   (let* ((token (base64-string-to-usb8-array (load-api-token)))
          (q (make-instance 'finite-queue))
+         (ctx (make-instance 'context :token token
+                                      :queue q
+                                      :lock (mp:make-process-lock)))
          (ws (open-websocket endpoint
                              :on-message (lambda (contract data ext)
                                            (declare (ignore contract ext))
-                                           (let ((msg (decrypt token data)))
-                                             (mp:enqueue q (from-json msg))
-                                             ))
+                                           (mp:with-process-lock ((lock ctx))
+                                             (when (process-msg? ctx)
+                                               (let ((msg (decrypt token data)))
+                                               (mp:enqueue q (from-json msg))
+                                               ))))
                              :on-close (lambda (contract code data)
                                          (declare (ignore contract))
                                          (format *debug-io* "~&CLOSED with code ~A ~A~%" code data))
@@ -110,13 +117,24 @@
                                          (format *debug-io* "~&ERROR: ~A~%" contract))
                              :debug :t
                              )))
-    (make-instance 'context :token token
-                            :websocket ws
-                            :queue q)
+    (setf (websocket ctx) ws)
+    ctx
     ))
 
 (defmethod destroy-context ((self context))
   (close-websocket (websocket self) :wait t))
+
+(defmacro with-incoming-messages ((ctx &rest args) &body body)
+  `(let ((lock (lock ,ctx)))
+     ;; capture messages
+     (mp:with-process-lock (lock)
+       (setf (process-msg? ,ctx) t))
+     ;; process
+     (unwind-protect (progn ,@body)
+       ;; discard again
+       (mp:with-process-lock (lock)
+         (setf (process-msg? ,ctx) nil))
+       )))
 
 (defmethod send ((self context) js)
   (let* ((msg (jsown:to-json (to-json js)))

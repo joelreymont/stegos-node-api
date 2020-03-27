@@ -81,11 +81,10 @@
 (defmethod expect ((self client) matcher &key (debug nil) (wait *max-wait*))
   (loop for o = (mp:dequeue (queue (ctx self)) :wait wait)
         unless (member (type-of o) (message-filters self))
-        when (or (null o) (funcall matcher o))
-        return o do
-          (when (and debug (not (member (type-of o) (message-filters self))))
-            (format *debug-io* "--> ~A~%" o))
-        ))
+          when (or (null o) (funcall matcher o))
+            return o do
+              (when (and debug (not (member (type-of o) (message-filters self))))
+                (format *debug-io* "--> ~A~%" o))))
 
 (defmethod wait-for-tx ((self client) seq &key debug)
   (prog ((o (expect self (match-type-seq 'tx-created seq) :debug debug))
@@ -125,7 +124,7 @@
      (when debug
        (format *debug-io* "~&wait-for-tx: <done> ~A~%" id))
      (return (values t id))
-     ))
+    ))
 
 (defmethod slurp-all ((self client) &key (debug nil))
   (expect self #'null :debug debug :wait 0))
@@ -153,28 +152,31 @@
     ))
 
 (defmethod get-chunks ((self client) account-id)
-  (send self (make-get-utxos :id account-id))
-  (let* ((utxos (expect self (match-type-seq 'utxos (seq self))))
-         (coins (map 'vector (lambda (v) (utxo-amount v))
-                     (utxos-private utxos))))
-    (sort coins #'>)
-    (chunk-vector coins 100)
+  (with-incoming-messages ((ctx self))
+    (send self (make-get-utxos :id account-id))
+    (let* ((utxos (expect self (match-type-seq 'utxos (seq self))))
+           (coins (map 'vector (lambda (v) (utxo-amount v))
+                       (utxos-private utxos))))
+      (sort coins #'>)
+      (chunk-vector coins 100)
+      )
     ))
 
 (defmethod fetch-accounts ((self client) &key (debug nil))
-  (send self (make-get-accounts))
-  (let* ((o (expect self (match-type-seq 'accounts (seq self)) :debug debug))
-         (accounts (accounts-accounts o)))
-    (loop for k being the hash-keys of accounts
-            using (hash-value v)
-          for acc = (make-instance 'account
-                                   :address (account-keys-pkey v )
-                                   :net-key (account-keys-network-pkey v)
-                                   :private$ (make-instance 'balance)
-                                   :public$ (make-instance 'balance)
-                                   :stake$ (make-instance 'balance)) do
-                                     (setf (gethash k (accounts self)) acc))
-    ))
+  (with-incoming-messages ((ctx self))
+    (send self (make-get-accounts))
+    (let* ((o (expect self (match-type-seq 'accounts (seq self)) :debug debug))
+           (accounts (accounts-accounts o)))
+      (loop for k being the hash-keys of accounts
+              using (hash-value v)
+            for acc = (make-instance 'account
+                                     :address (account-keys-pkey v )
+                                     :net-key (account-keys-network-pkey v)
+                                     :private$ (make-instance 'balance)
+                                     :public$ (make-instance 'balance)
+                                     :stake$ (make-instance 'balance)) do
+                                       (setf (gethash k (accounts self)) acc))
+      )))
 
 (defmethod pay ((self client) account-id to amt &key (comment "") (proof t) (debug t))
   (flet ((pay () (send self (make-create-payment-with-cert :id account-id
@@ -185,17 +187,20 @@
                                                            :has-certificate? proof
                                                            )))
          (wait () (multiple-value-list (wait-for-tx self (seq self) :debug debug))))
-    (pay)
-    (loop for (v resend?) = (wait)
-          while (and (null v) resend?) do
-            (when debug
-              (format *debug-io* "pay: Account ~A: mempool is full, waiting~%" account-id))
-            (sleep *microblock-time*)
-            (pay)
-          )))
+    (with-incoming-messages ((ctx self))
+      (pay)
+      (loop for (v resend?) = (wait)
+            while (and (null v) resend?) do
+              (when debug
+                (format *debug-io* "pay: Account ~A: mempool is full, waiting~%" account-id))
+              (sleep *microblock-time*)
+              (pay)
+            )
+      )))
 
 (defmethod sweep-utxos ((self client) account-id &key debug)
-  (let ((address (address-of self account-id))
+  (with-incoming-messages ((ctx self))
+    (let ((address (address-of self account-id))
         (chunks (get-chunks self account-id)))
     (when debug
       (format *debug-io* "sweep-utxos: Account ~A: ~A chunks found~%" account-id (length chunks)))
@@ -206,21 +211,23 @@
               (format *debug-io* "sweep-utxos: Collecting #~A: ~A~%" i amt))
             ;; pay to self
             (pay self account-id address (+ amt 1) :comment "Sweep" :debug debug)
-          )))
+          ))))
 
 (defmethod update-balance ((self client) account-id)
   (let ((acc (gethash account-id (accounts self))))
     (when acc
-      (send self (make-get-balance :id account-id))
-      (let ((balance (expect self (match-type-seq 'account-balance (seq self)))))
-        (flet ((update (to from)
-                 (setf (total$ to) (balance-info-total from)
-                       (available$ to) (balance-info-available from))
-                 ))
-          (update (private$ acc) (account-balance-private balance))
-          (update (public$ acc) (account-balance-public balance))
-          (update (stake$ acc) (account-balance-stake balance))
-          )))))
+      (with-incoming-messages ((ctx self))
+        (send self (make-get-balance :id account-id))
+        (let ((balance (expect self (match-type-seq 'account-balance (seq self)))))
+          (flet ((update (to from)
+                   (setf (total$ to) (balance-info-total from)
+                         (available$ to) (balance-info-available from))
+                   ))
+            (update (private$ acc) (account-balance-private balance))
+            (update (public$ acc) (account-balance-public balance))
+            (update (stake$ acc) (account-balance-stake balance))
+            ))
+        ))))
 
 (defmethod balance ((self client) account-id)
   (let ((acc (gethash account-id (accounts self))))
@@ -232,40 +239,45 @@
   (update-balance self account-id)
   (let* ((acc (gethash account-id (accounts self)))
          (available (available$ (private$ acc))))
-    (send self (make-stake-remote :id account-id
-                                  :amount (- available 2000)
-                                  :fee 1000
-                                  ))
+    (with-incoming-messages ((ctx self))
+      (send self (make-stake-remote :id account-id
+                                    :amount (- available 2000)
+                                    :fee 1000
+                                    ))
+      (multiple-value-bind (tx-id status)
+          (wait-for-tx self (seq self) :debug debug)
+        (when debug
+          (format *debug-io* "stake-remote-all: tx ~A ~A~%" tx-id status))
+        ))))
+
+(defmethod unstake ((self client) account-id amount &key debug)
+  (with-incoming-messages ((ctx self))
+    (send self (make-unstake :id account-id
+                             :amount amount
+                             :fee 1000
+                             ))
     (multiple-value-bind (tx-id status)
         (wait-for-tx self (seq self) :debug debug)
       (when debug
-        (format *debug-io* "stake-remote-all: tx ~A ~A~%" tx-id status))
+        (format *debug-io* "unstake: tx ~A ~A~%" tx-id status))
       )))
 
-(defmethod unstake ((self client) account-id amount &key debug)
-  (send self (make-unstake :id account-id
-                           :amount amount
-                           :fee 1000
-                           ))
-  (multiple-value-bind (tx-id status)
-      (wait-for-tx self (seq self) :debug debug)
-    (when debug
-      (format *debug-io* "unstake: tx ~A ~A~%" tx-id status))
-    ))
-
 (defmethod unlock-account ((self client) account-id)
-  (send self (make-unlock-account :id account-id
-                                  :password (password self)))
-  (expect self (match-type-seq 'unlocked (seq self))))
+  (with-incoming-messages ((ctx self))
+    (send self (make-unlock-account :id account-id
+                                    :password (password self)))
+    (expect self (match-type-seq 'unlocked (seq self)))
+    ))
 
 ;; "2020-01-01T00:00:00.00000Z"
 (defmethod get-payment-history ((self client) account-id timestamp &optional (limit 1000000))
-  (send self (make-get-payment-history :id account-id
+  (with-incoming-messages ((ctx self))
+    (send self (make-get-payment-history :id account-id
                                        :from-time timestamp
-                                       :limit limit
-                                       ))
-  (expect self (match-type-seq 'payment-history (seq self))))
-
+                                         :limit limit
+                                         ))
+   (expect self (match-type-seq 'payment-history (seq self)))
+   ))
 
 (defmethod sweep-and-stake-all ((self client) &key (debug nil))
   (let ((accounts `("pool01" "validator01" "validator02" "validator03" "validator04"
@@ -277,7 +289,7 @@
           (stake-remote-all self account-id :debug debug)
         )))
 
-(defmethod count-chunks ((self client) &key (debug nil))
+(defmethod count-chunks ((self client))
   (let ((accounts `("pool01" "validator01" "validator02" "validator03" "validator04"
                              "validator05" "validator06" "validator07" "validator08")))
     (loop for account-id in accounts do
@@ -285,7 +297,3 @@
       (format *debug-io* "count-chunks: ~A = ~A chunks~%" account-id (length (get-chunks self account-id)))
           )))
 
-;; (loop for i from 1 to 8 for account-id = (format nil "validator0~A" i) do
-  
-;;   (update-balance c account-id)
-;;   (format t "~&~A: ~A" account-id (balance c account-id)))
