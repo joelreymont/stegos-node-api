@@ -36,11 +36,12 @@
     (pushnew k (message-filters self))
     ))
 
-(defun create-client (password)
-  (let ((client (make-instance 'client
-                               :ctx (create-context)
-                               :password password
-                               )))
+(defun create-client (password &key (endpoint *endpoint*) (token (load-api-token)))
+  (let* ((ctx (create-context :endpoint endpoint :token token))
+         (client (make-instance 'client
+                                :ctx ctx
+                                :password password
+                                )))
     (filter client
             'internal-spent
             'internal-received
@@ -79,7 +80,7 @@
 (defvar *max-wait* 30.0)
 
 (defmethod expect ((self client) matcher &key (debug nil) (wait *max-wait*))
-  (loop for o = (mp:dequeue (queue (ctx self)) :wait wait)
+  (loop for o = (mp:mailbox-read (queue (ctx self)) :timeout wait)
         unless (member (type-of o) (message-filters self))
           when (or (null o) (funcall matcher o))
             return o do

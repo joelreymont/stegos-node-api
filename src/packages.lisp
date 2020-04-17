@@ -1,14 +1,8 @@
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (require :websocket)
-  (require :ssl))
-
 (defpackage stegos/node-api
   (:use :cl
-        :excl
-        :net.aserve
-        :net.aserve.client
         :jsown-obj
-   )
+        :base64
+        )
   (:export :client :create-client :destroy-client
            :ctx :password :seq :accounts
            :fetch-accounts :address-of

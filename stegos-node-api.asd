@@ -6,7 +6,10 @@
                "jsown-obj"
                "local-time"
                "alexandria"
-               "cl-ppcre")
+               "cl-ppcre"
+               "cl-base64"
+               "flexi-streams"
+               "websocket-driver-client")
   :components ((:module "src"
                 :components
                 ((:file "packages")

@@ -1,52 +1,13 @@
 (in-package :stegos/node-api)
 
 ;;;
-;;; Finite queue
-;;;
-
-(defvar *default-finite-queue-max-size* 16384
-  "The default maximum size for a finite-queue.")
-
-(defclass finite-queue (mp:queue)
-  ((count :documentation "The current size of the queue."
-          :initform 0
-	        :accessor queue-count)
-   (max-size :documentation "The maximum size of the queue."
-             :initform *default-finite-queue-max-size*
-	           :accessor queue-max-size))
-  (:documentation "A mp:queue with finite size."))
-
-(define-condition queue-full (simple-error)
-  ((queue :initarg :queue
-          :reader queue-full-queue))
-  (:report (lambda (condition stream)
-  	         (let ((queue (queue-full-queue condition)))
-               (format stream 
-               	       "~A is at it's maximum size of ~D."
-  		                 queue
-                       (queue-max-size queue))))))
-
-(defmethod mp:enqueue :around ((queue finite-queue) what)
-  (declare (ignorable what))
-  (when (>= (queue-count queue) (queue-max-size queue))
-    (error 'queue-full :queue queue))
-  (incf-atomic (slot-value queue 'count) 1)
-  (call-next-method))
-
-(defmethod mp:dequeue :around ((queue finite-queue) &key wait empty-queue-results)
-  (declare (ignorable wait empty-queue-results))
-  (let ((item (call-next-method)))
-    (decf-atomic (slot-value queue 'count) 1)
-    item))
-
-;;;
 ;;; Client
 ;;;
 
 (defvar *endpoint* "ws://localhost:3145/")
 
 (defun load-api-token ()
-  (let* ((path #+macosx #P"~/Library/Application Support/")
+  (let* ((path (sys:get-folder-path :my-appsupport))
          (filename (merge-pathnames #P"stegos/api.token" path)))
     (with-open-file (stream filename)
       (let ((contents (make-string (file-length stream))))
@@ -55,7 +16,7 @@
     ))
 
 (defun decrypt (token msg)
-  (let* ((decoded (base64-string-to-usb8-array msg))
+  (let* ((decoded (base64:base64-string-to-usb8-array msg))
          (nonce (make-array 16
                             :element-type '(unsigned-byte 8)
                             :displaced-to decoded))
@@ -68,24 +29,22 @@
                                      :mode :ctr
                                      :initialization-vector nonce)))
     (crypto:decrypt-in-place cipher decoded :start 16)
-    (with-underlying-simple-vector (data v)
-      ;;(format *debug-io* "~&decrypt: ~A~%" (octets-to-string v :start 16))
-      (jsown:parse (octets-to-string v :start 16))
-      )))
+    (jsown:parse (flexi-streams:octets-to-string data))
+    ))
 
 (defun encrypt (token msg)
   (let* ((nonce (crypto:random-data 16))
          (data (make-array (+ (length msg) 16)
                            :element-type '(unsigned-byte 8)))
          (data (replace data nonce))
-         (data (replace data (string-to-octets msg) :start1 16))
+         (data (replace data (flexi-streams:string-to-octets msg) :start1 16))
          (cipher (crypto:make-cipher :aes
                                      :key token
                                      :mode :ctr
                                      :initialization-vector nonce
                                      )))
     (crypto:encrypt-in-place cipher data :start 16)
-    (usb8-array-to-base64-string data :wrap-at-column nil)
+    (base64:usb8-array-to-base64-string data)
     ))
 
 (defclass context ()
@@ -96,50 +55,55 @@
    (process-msg? :initform nil :accessor process-msg?)
    ))
 
-(defun create-context (&optional (endpoint *endpoint*))
-  (let* ((token (base64-string-to-usb8-array (load-api-token)))
-         (q (make-instance 'finite-queue))
+(define-condition wsd::protocol-error (simple-error) ())
+
+(defun create-context (&key (endpoint *endpoint*) (token (load-api-token)))
+  (let* ((token (base64:base64-string-to-usb8-array token))
+         (q (mp:make-mailbox :size 16384))
          (ctx (make-instance 'context :token token
                                       :queue q
-                                      :lock (mp:make-process-lock)))
-         (ws (open-websocket endpoint
-                             :on-message (lambda (contract data ext)
-                                           (declare (ignore contract ext))
-                                           (mp:with-process-lock ((lock ctx))
-                                             (when (process-msg? ctx)
-                                               (let ((msg (decrypt token data)))
-                                               (mp:enqueue q (from-json msg))
-                                               ))))
-                             :on-close (lambda (contract code data)
-                                         (declare (ignore contract))
-                                         (format *debug-io* "~&CLOSED with code ~A ~A~%" code data))
-                             :on-error (lambda (contract)
-                                         (format *debug-io* "~&ERROR: ~A~%" contract))
-                             :debug :t
-                             )))
+                                      :lock (mp:make-lock :name "node-api-context-lock")))
+         (ws (wsd:make-client endpoint)))
     (setf (websocket ctx) ws)
+    (wsd:on :close ws
+            (lambda (&key code reason)
+              (format *debug-io* "Websocket closing: ~A/~A~%" code reason)
+              ))
+    (wsd:on :error ws
+            (lambda (err)
+              (format *debug-io* "Websocket error: ~S~%" err)
+              ))
+    (wsd:on :message ws
+            (lambda (data)
+              (mp:with-lock ((lock ctx) nil 0)
+                (when (process-msg? ctx)
+                  (let ((msg (decrypt token data)))
+                    (mp:mailbox-send q (from-json msg))
+                    )))))
+    (wsd:start-connection ws)
     ctx
     ))
 
 (defmethod destroy-context ((self context))
-  (close-websocket (websocket self) :wait t))
+  (wsd:close-connection (websocket self)))
 
-(defmacro with-incoming-messages ((ctx &rest args) &body body)
+(defmacro with-incoming-messages ((ctx) &body body)
   `(let ((lock (lock ,ctx)))
      ;; capture messages
-     (mp:with-process-lock (lock)
+     (mp:with-lock (lock nil 0)
        (setf (process-msg? ,ctx) t))
      ;; process
      (unwind-protect (progn ,@body)
        ;; discard again
-       (mp:with-process-lock (lock)
+       (mp:with-lock (lock nil 0)
          (setf (process-msg? ,ctx) nil))
        )))
 
 (defmethod send ((self context) js)
   (let* ((msg (jsown:to-json (to-json js)))
          (encrypted (encrypt (token self) msg)))
-    (websocket-send (websocket self) encrypted)))
+    (wsd:send (websocket self) encrypted)
+   ))
 
 (defun millisecond-timestamp ()
   (let ((stamp (local-time:now)))
